@@ -4,6 +4,7 @@ import storage.DB;
 import storage.File;
 import storage.Block;
 import Utils.CsvRowConverter;
+import index.bplusTree.BPlusTreeIndexFile;
 
 import java.io.BufferedReader;
 import java.io.FileReader;
@@ -23,10 +24,17 @@ import org.json.simple.parser.ParseException;
 
 import java.util.Iterator;
 
+import java.nio.ByteBuffer;
+import javafx.util.Pair;
+import java.util.Arrays;
+import java.nio.charset.StandardCharsets;
+
+
 public class StorageManager {
 
     private HashMap<String, Integer> file_to_fileid;
     private DB db;
+    private BPlusTreeIndexFile indexFile;
 
     enum ColumnType {
         VARCHAR, INTEGER, BOOLEAN, FLOAT, DOUBLE
@@ -40,7 +48,7 @@ public class StorageManager {
     // loads CSV files into DB362
     public void loadFile(String csvFile, List<RelDataType> typeList) {
 
-        System.out.println("Loading file: " + csvFile);
+        // System.out.println("Loading file: " + csvFile);
 
         String table_name = csvFile;
 
@@ -65,7 +73,6 @@ public class StorageManager {
 
                     String[] columnNames = CsvRowConverter.parseLine(line);
                     List<String> columnNamesList = new ArrayList<>();
-
                     for(String columnName : columnNames) {
                         // if columnName contains ":", then take part before ":"
                         String c = columnName;
@@ -103,7 +110,7 @@ public class StorageManager {
             e.printStackTrace();
         }
 
-        System.out.println("Done writing file\n");
+        // System.out.println("Done writing file\n");
         int counter = db.addFile(f);
         file_to_fileid.put(table_name, counter);
         return;
@@ -147,6 +154,7 @@ public class StorageManager {
                 } else {
                     variable_length_nullBitmap.add(false);
                     String val = (String) row[i];
+                    
                     byte[] strBytes = val.getBytes();
                     for(int j = 0; j < strBytes.length; j++) {
                         variable_length_Bytes.add(strBytes[j]);
@@ -216,7 +224,9 @@ public class StorageManager {
 
         //                       bytes for fixed length and variable length fields          offset & length of var fields
         byte[] result = new byte[fixed_length_Bytes.size() + variable_length_Bytes.size() + 4 * variable_length.size() + num_bytes_for_bitmap];
-        int variable_length_offset = 4 * variable_length.size() + fixed_length_Bytes.size() + num_bytes_for_bitmap;
+        int variable_length_offset = 4 * variable_length.size() + 
+        
+        fixed_length_Bytes.size() + num_bytes_for_bitmap;
 
         int idx = 0;
         for(; idx < variable_length.size() ; idx ++){
@@ -250,6 +260,7 @@ public class StorageManager {
                 idx++;
             }
         }
+
         for(int i = 0; i < variable_length_nullBitmap.size(); i++) {
             if(variable_length_nullBitmap.get(i)) {
                 result[idx] |= (1 << (7 - bitmap_idx));
@@ -306,7 +317,7 @@ public class StorageManager {
         schema.write_data(0, num_columns);
 
         int idx = 0, curr_offset = schema.get_block_capacity();
-        for(int i = 0 ; i < columnNames.size() ; i ++){
+        for(int i = 0; i < columnNames.size(); i ++){
             // if column type is fixed, then write it
             if(!typeList.get(i).getSqlTypeName().getName().equals("VARCHAR")) {
                 
@@ -381,24 +392,416 @@ public class StorageManager {
         return file_to_fileid.get(index_file_name) != null;
     }
 
+    public boolean getBit(byte b, int i) {
+        // Shift the bit at the ith position to the rightmost position
+        // Then, check if the least significant bit (rightmost bit) is 1 or 0
+        return ((b >> i) & 1) == 1;
+    }
+
+    public Object[] convertToObjects(byte[] byteArray, List<Integer> typeList, String table_name) {
+        List<Object> objects = new ArrayList<>();
+        int offset = 0;
+        List<Object> variableobjects = new ArrayList<>();
+        List<Object> fixedObjects = new ArrayList<>();
+        // Iterate over each type in the type list
+        int i = 0;
+        for(i=0; i<typeList.size(); i++){
+            offset = ((byteArray[4 * i + 1] & 0xFF) << 8) | (byteArray[4 * i] & 0xFF);
+            int length = ((byteArray[4 * i + 3] & 0xFF) << 8) | (byteArray[4 * i + 2] & 0xFF);
+            
+            byte[] data = Arrays.copyOfRange(byteArray, offset, offset + length);
+            variableobjects.add(new String(data, StandardCharsets.UTF_8));
+            if(offset + length == byteArray.length || offset + length == byteArray.length - 1){
+                break;
+            }
+        }
+
+        // get the number of colums from the schema block
+        byte[] schemaBlock = get_data_block(table_name, 0);
+        int num_of_colums = ((schemaBlock[1] & 0xFF) << 8) | (schemaBlock[0] & 0xFF);
+        int num_of_fix_colums = (num_of_colums - i - 1);
+        int startOffsetOffix = 4 * i + 4;
+
+        // TODO: CONVER ACCRODING TO CORRECT SIZE OF THE BYTES
+        for(int j=0; j<num_of_colums; j++){
+            
+            if(typeList.get(j) == ColumnType.INTEGER.ordinal() || typeList.get(j) == ColumnType.FLOAT.ordinal()){
+                byte[] datai= Arrays.copyOfRange(byteArray, startOffsetOffix, startOffsetOffix + 4);
+                int val = ((datai[3] & 0xFF) << 24) |
+                    ((datai[2] & 0xFF) << 16) |
+                    ((datai[1] & 0xFF) << 8) |
+                    (datai[0] & 0xFF);
+                fixedObjects.add(val);
+                startOffsetOffix += 4;
+            }
+            else if(typeList.get(j) == ColumnType.BOOLEAN.ordinal()){
+                fixedObjects.add(byteArray[startOffsetOffix] != 0);
+                startOffsetOffix += 1;
+            }
+            else if(typeList.get(j) == ColumnType.DOUBLE.ordinal()){
+                byte[] datai = Arrays.copyOfRange(byteArray, startOffsetOffix, startOffsetOffix + 8);
+                long longBits = 0;
+                for (int b = 0; b < 8; b++) {
+                    longBits |= ((long) (datai[b] & 0xFF)) << (8 * b);
+                }
+
+                double val = Double.longBitsToDouble(longBits);
+                fixedObjects.add(val);
+                startOffsetOffix += 8;
+            }
+        }
+
+        // Object[] combinedArray = new Object[fixedObjects.size() + variableobjects.size()];
+        ArrayList<Object> combinedArray = new ArrayList<Object>();
+        // Copy elements from list1 to the combined array
+        int index = 0;
+        for (Object obj : fixedObjects) {
+            combinedArray.add(obj);
+        }
+
+        // Copy elements from list2 to the combined array
+        for (Object obj : variableobjects) {
+            combinedArray.add(obj);
+        }
+
+        int endIndexOfBitMap = (((byteArray[1] & 0xFF) << 8) | (byteArray[0] & 0xFF));
+        for(i=0; i<combinedArray.size(); i++) {
+            if(getBit(byteArray[startOffsetOffix], i%8)){
+                combinedArray.set(i, null);
+            }
+            if(i != 0 && (i + 1) % 8 == 0){
+                startOffsetOffix++;
+            }
+        }
+        return combinedArray.toArray();
+    }
+
+    // public List<RelDataType> convertEnumIdsToRelDataType(List<Integer> enumIds) {
+    //     List<RelDataType> typeList = new ArrayList<>();
+        
+    //     for (Integer enumId : enumIds) {
+    //         // Map each enum ID to its corresponding RelDataType
+    //         switch (enumId) {
+    //             case 0:
+    //                 typeList.add(RelDataType.VARCHAR); // Assuming RelDataType.VARCHAR represents VARCHAR type
+    //                 break;
+    //             case 1:
+    //                 typeList.add(RelDataType.INTEGER); // Assuming RelDataType.INTEGER represents INTEGER type
+    //                 break;
+    //             case 2:
+    //                 typeList.add(RelDataType.BOOLEAN); // Assuming RelDataType.BOOLEAN represents BOOLEAN type
+    //                 break;
+    //             case 3:
+    //                 typeList.add(RelDataType.FLOAT); // Assuming RelDataType.FLOAT represents FLOAT type
+    //                 break;
+    //             case 4:
+    //                 typeList.add(RelDataType.DOUBLE); // Assuming RelDataType.DOUBLE represents DOUBLE type
+    //                 break;
+    //             default:
+    //                 throw new IllegalArgumentException("Invalid enum ID: " + enumId);
+    //         }
+    //     }
+        
+    //     return typeList;
+    // }
+
+    public static List<Integer> readEnumtypes(byte[] byteArray) {
+        List<Integer> integerValues = new ArrayList<>();
+
+        // Check if byteArray has at least 4 bytes (2 for the number of offsets and 2 for the offset values)
+        if (byteArray.length < 4) {
+            throw new IllegalArgumentException("Byte array is too short");
+        }
+
+        // Read the number of offsets (n)
+        int numberOfOffsets = ((byteArray[1] & 0xFF) << 8) | (byteArray[0] & 0xFF);
+        
+        for (int i = 0; i < numberOfOffsets; i++) {
+            int offset = ((byteArray[3 + i * 2] & 0xFF) << 8) | (byteArray[2 + i * 2] & 0xFF);
+            if (offset < byteArray.length) {
+                int integerValue = byteArray[offset] & 0xFF; // Read the first byte at the specified position
+                integerValues.add(integerValue);
+            } else {
+                // Offset is out of bounds, handle error or ignore
+                throw new IllegalArgumentException("offset out of bounds");
+            }
+        }
+
+        return integerValues;
+    }
+
+
+    public Pair<Integer, Integer> getColumnTypeForColumnValue(byte[] byteArray, String columnValue) {
+        // Read the number of column values (n)
+        int numberOfColumnValues = ((byteArray[1] & 0xFF) << 8) | (byteArray[0] & 0xFF);
+        int indexOfV = 0;
+        int indexOfF = 0;
+        // Read the offset values
+        List<Integer> offsets = new ArrayList<>();
+        for (int i = 0; i < numberOfColumnValues; i++) {
+            int offset = ((byteArray[3 + (i * 2)] & 0xFF) << 8) | (byteArray[2 + (i * 2)] & 0xFF);
+            if (offset + 2 <= byteArray.length) {
+                int columnType = byteArray[offset] & 0xFF; // Read the type of the column value
+                if(columnType == ColumnType.VARCHAR.ordinal()) indexOfV++;
+                else indexOfF++;
+                int columnValueLength = byteArray[offset + 1] & 0xFF; // Read the length of the column value
+                if (offset + 2 + columnValueLength <= byteArray.length) {
+                    String value = new String(byteArray, offset + 2, columnValueLength); // Read the column value
+                    if (value.equals(columnValue)) {
+                        return new Pair<>(columnType, ( columnType == 0 ? indexOfV : indexOfF));
+                    }
+                }
+            } else {
+                // Offset is out of bounds, handle error or ignore
+                System.err.println("Offset out of bounds: " + offset);
+            }
+
+        }
+
+        // Column value not found
+        return null;
+    }
+
+    public int getOffsetIndexOfColumnValue(byte[] byteArray, String columnValue) {
+        // Read the number of column values (n)
+        int numberOfColumnValues = ((byteArray[1] & 0xFF) << 8) | (byteArray[0] & 0xFF);
+
+        // Read the offset values
+        for (int i = 0; i < numberOfColumnValues; i++) {
+            int offset = ((byteArray[2 + i * 2] & 0xFF) << 8) | (byteArray[3 + i * 2] & 0xFF);
+            if (offset + 2 <= byteArray.length) {
+                int columnType = byteArray[offset] & 0xFF; // Read the type of the column value
+                int columnValueLength = byteArray[offset + 1] & 0xFF; // Read the length of the column value
+                if (offset + 2 + columnValueLength <= byteArray.length) {
+                    String value = new String(byteArray, offset + 2, columnValueLength); // Read the column value
+                    if (value.equals(columnValue)) {
+                        return offset;
+                    }
+                }
+            } else {
+                // Offset is out of bounds, handle error or ignore
+                System.err.println("Offset out of bounds: " + offset);
+            }
+        }
+
+        // Column value not found
+        return -1;
+    }
+
+    public byte[] extractColumnBytes(byte[] data, int enumTypeId, int indexOfType, List<Integer> types){
+        int zeroCount = 0;
+        for (Integer value : types) {
+            if (value == 0) {
+                zeroCount++;
+            }
+        }
+        if(enumTypeId != ColumnType.VARCHAR.ordinal()){
+            // find the first byte of the fixed length section
+            int offset = 0;
+            int nonZeroCount = types.size() - zeroCount;
+            int i = zeroCount * 4;
+            // for(i=0; i<types.size() - zeroCount; i++){
+            //     offset = ((data[4 * i + 1] & 0xFF) << 8) | (data[4 * i] & 0xFF);
+            //     System.out.println("extractcolumnBytes offset = " + offset);
+            //     int length = ((data[4 * i + 2] & 0xFF) << 8) | (data[4 * i + 3] & 0xFF);
+            //     if(offset + length == data.length || offset + length == data.length - 1){
+            //         break;
+            //     }
+            // }
+
+            int firstByteOfColumn = i; // pointing to the first byte of the fixed length section
+            // int firstByteOfColumn = i + (4 * (index - 1));
+            for( i=1; i<indexOfType; i++){
+                if(types.get(i) == ColumnType.INTEGER.ordinal() || types.get(i) == ColumnType.FLOAT.ordinal()){
+                    firstByteOfColumn+=4;
+                }
+                else if(types.get(i) == ColumnType.BOOLEAN.ordinal()){
+                    firstByteOfColumn+=1;
+                }
+                else if(types.get(i) == ColumnType.DOUBLE.ordinal()){
+                    firstByteOfColumn+=8;
+                }
+            }
+            int length = 1;
+            if(enumTypeId == 1 || enumTypeId == 3) length = 4;
+            else if(enumTypeId == 2) length = 1;
+            else if(enumTypeId == 4) length = 8;
+            int val = ((data[firstByteOfColumn+3] & 0xFF) << 24) |
+                ((data[firstByteOfColumn+2] & 0xFF) << 16) |
+                ((data[firstByteOfColumn+1] & 0xFF) << 8) |
+                (data[firstByteOfColumn] & 0xFF);
+            return Arrays.copyOfRange(data, firstByteOfColumn, firstByteOfColumn + length);
+
+        }
+        // if the column is variable length field
+        int startIndex = (indexOfType - 1) * 4;
+        int offset = ((data[startIndex] & 0xFF) << 8) | (data[startIndex + 1] & 0xFF);
+        int length = ((data[startIndex + 2] & 0xFF) << 8) | (data[startIndex + 3] & 0xFF);
+        return Arrays.copyOfRange(data, offset, offset + length);
+    }
+    
+
     // the order of returned columns should be same as the order in schema
     // i.e., first all fixed length columns, then all variable length columns
     public List<Object[]> get_records_from_block(String table_name, int block_id){
         /* Write your code here */
         // return null if file does not exist, or block_id is invalid
         // return list of records otherwise
-        return null;
+        // int file_id = file_to_fileid.get(table_name);
+        // System.out.println("get records from block exists");
+        byte[] data = get_data_block(table_name, block_id);
+        if(file_to_fileid.get(table_name) == null || data == null){
+            return null;
+        }
+
+        List<Object[]> records = new ArrayList<Object[]>();
+        int numRecords = ((data[0] & 0xFF ) << 8) | (data[1] & 0xFF);
+        int offsetIndex = 2;
+        int previousStartOffset = data.length;
+        byte[] schemaBlock = get_data_block(table_name, 0); // schema block
+        List<Integer> enumValues = readEnumtypes(schemaBlock);
+        
+        for(int i=0; i<numRecords; i++){
+            int start = ((data[i*2 + 2] & 0xFF ) << 8) | (data[i*2 + 3] & 0xFF);
+            int end = previousStartOffset;
+            previousStartOffset = start;
+            byte[] record = Arrays.copyOfRange(data, start, end);
+            records.add(convertToObjects(record, enumValues, table_name));
+        }
+        return records;
+        
     }
 
     public boolean create_index(String table_name, String column_name, int order) {
         /* Write your code here */
-        return false;
+        try{
+            byte[] schemaData = get_data_block(table_name, 0); // finding the schema block
+            if(file_to_fileid.get(table_name) == null || schemaData == null){
+                return false;
+            }
+            Pair<Integer, Integer> typeAndIndex = getColumnTypeForColumnValue(schemaData, column_name);
+            int enumTypeId = typeAndIndex.getKey();
+            int indexOfType = typeAndIndex.getValue();
+            if(enumTypeId == -1){
+                return false;
+            }
+            
+            switch (enumTypeId) {
+                case 0:
+                    indexFile = new BPlusTreeIndexFile<>(order, String.class);
+                    break;
+                case 1:
+                    indexFile = new BPlusTreeIndexFile<>(order, Integer.class);
+                    break;
+                case 2:
+                    indexFile = new BPlusTreeIndexFile<>(order, Boolean.class);
+                    break;
+                case 3:
+                    indexFile = new BPlusTreeIndexFile<>(order, Float.class);
+                    break;
+                case 4:
+                    indexFile = new BPlusTreeIndexFile<>(order, Double.class);
+                    break;
+                default:
+                    return false; // Handle unsupported data types
+            }
+            String fileName = table_name + "_" + column_name + "_index";
+            /* logic to insert the columns to bplus tree */
+            byte[] schemaBlock = get_data_block(table_name, 0); // schema block
+            List<Integer> enumValues = readEnumtypes(schemaBlock);
+
+            int block_id = 1;
+            byte[] blockOfRecords;
+            while((blockOfRecords = get_data_block(table_name, block_id)) != null){
+                int numRecords = ((blockOfRecords[0] & 0xFF ) << 8) | (blockOfRecords[1] & 0xFF);
+                int offsetIndex = 2;
+                int previousStartOffset = blockOfRecords.length;
+                for(int i=0; i<numRecords; i++){
+                    int start = ((blockOfRecords[(i * 2) + 2] & 0xFF) << 8) | (blockOfRecords[(i * 2) + 3] & 0xFF);
+                    int end = previousStartOffset;
+                    previousStartOffset = start;
+                    byte[] record = Arrays.copyOfRange(blockOfRecords, start, end-1);
+                    byte[] data = extractColumnBytes(record, enumTypeId, indexOfType, enumValues);
+                    Object value = null;
+                    switch (enumTypeId) {
+                        case 1:
+                            int val = ((data[3] & 0xFF) << 24) |
+                                        ((data[2] & 0xFF) << 16) |
+                                        ((data[1] & 0xFF) << 8) |
+                                        (data[0] & 0xFF);
+                            value = val;
+                            break;
+                        case 0:
+                            value = new String(data, StandardCharsets.UTF_8); // Assuming UTF-8 encoding
+                            break;
+                        case 2:
+                            value = data[0] != 0;
+                            break;
+                        case 3:
+                            value = ByteBuffer.wrap(data, 0, data.length).getFloat();
+                            break;
+                        case 4:
+                            value = ByteBuffer.wrap(data, 0, data.length).getDouble();
+                            break;
+                    }
+                    if (value != null) {
+                        indexFile.insert(value, block_id); // Insert the value into the index file
+                    }
+                }
+                block_id++;
+            }
+            int fileIndex = db.addFile(indexFile);
+            file_to_fileid.put(fileName, fileIndex);
+            return false;
+        }catch (Exception e){
+            return false;
+        }
     }
 
     // returns the block_id of the leaf node where the key is present
     public int search(String table_name, String column_name, RexLiteral value) {
         /* Write your code here */
-        return -1;
+        
+        try{
+            if(!check_file_exists(table_name) || !check_index_exists(table_name, column_name)){
+                return -1;
+            }
+
+            byte[] data = get_data_block(table_name, 0);
+            if(data == null) return -1;
+
+            Pair<Integer, Integer> typeAndIndex = getColumnTypeForColumnValue(data, column_name);
+            int enumTypeId = typeAndIndex.getKey();
+            int indexOfType = typeAndIndex.getValue();
+            if(enumTypeId == -1){
+                return -1;
+            }
+            Object valuei;
+            switch (enumTypeId) {
+                case 0:
+                    valuei = value.toString();
+                    break;
+                case 1:
+                    valuei = Integer.parseInt(value.toString());
+                    break;
+                case 2:
+                    valuei = Boolean.parseBoolean(value.toString());
+                    break;
+                case 3:
+                    valuei = Float.parseFloat(value.toString());
+                    break;
+                case 4:
+                    valuei = Double.parseDouble(value.toString());
+                    break;
+                default:
+                    return -1; // Handle unsupported data types
+            }
+
+            return indexFile.search(valuei);
+        }
+        catch(Exception e){
+            return -1;
+        }
     }
 
     public boolean delete(String table_name, String column_name, RexLiteral value) {

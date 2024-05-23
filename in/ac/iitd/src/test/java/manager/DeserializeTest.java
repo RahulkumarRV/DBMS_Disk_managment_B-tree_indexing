@@ -20,13 +20,13 @@ public class DeserializeTest {
 
             // Uncomment this to test the function after implementing it
 
-            // assert(result.size() == 78);
+            assert(result.size() == 78);
 
-            // for(int i = 0; i < result.size(); i++){
-            //     assert(result.get(i).length == 4);
-            //     assert(result.get(i)[0] instanceof Integer);
-            //     assert(result.get(i)[0].equals(expected.get(i)));
-            // }
+            for(int i = 0; i < result.size(); i++){
+                assert(result.get(i).length == 4);
+                assert(result.get(i)[0] instanceof Integer);
+                assert(result.get(i)[0].equals(expected.get(i)));
+            }
 
             calciteConnection.close();
 

@@ -35,10 +35,10 @@ public class BPlusTreeTest {
             // 5 9 3 7 11 13 2 4 6 8 10 12 14 15 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16
 
             // Uncomment this to test the function after implementing it
-            // assert(result.size() == expected_result.size());
-            // for(int i = 0; i < result.size(); i++){
-            //     assert(result.get(i) == expected_result.get(i));
-            // }
+            assert(result.size() == expected_result.size());
+            for(int i = 0; i < result.size(); i++){
+                assert(result.get(i) == expected_result.get(i));
+            }
 
             calciteConnection.close();
             

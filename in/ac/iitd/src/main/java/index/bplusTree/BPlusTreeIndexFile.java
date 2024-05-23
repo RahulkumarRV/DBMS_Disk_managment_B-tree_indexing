@@ -6,6 +6,7 @@ import java.util.Queue;
 
 import java.util.ArrayList;
 import java.util.LinkedList;
+import java.util.List;
 
 /*
     * Tree is a collection of BlockNodes
@@ -69,10 +70,273 @@ public class BPlusTreeIndexFile<T> extends AbstractFile<BlockNode> {
         return isLeaf(blocks.get(id));
     }
 
+    public int compare(T key1, T key2) {
+        if (key1 instanceof Comparable && key2 instanceof Comparable) {
+            Comparable<T> comparableKey1 = (Comparable<T>) key1;
+            return comparableKey1.compareTo(key2);
+        }
+        // Default comparison result if Comparable interface is not implemented
+        return key1.toString().compareTo(key2.toString());
+    }
+
+    private int findLeafNode(T key){
+        int rootIndex = this.getRootId();
+        InternalNode<T> rootNode = (InternalNode<T>) this.blocks.get(rootIndex);
+        T[] keys = rootNode.getKeys();
+        int index = 0;
+        while(index < rootNode.getNumKeys() && this.compare(keys[index], key) < 0){
+            index = index + 1;
+        }
+        int[] children = rootNode.getChildren();
+        if(this.isLeaf(this.blocks.get(children[index]))){
+            return children[index];
+        }
+        else{
+            return findLeafNode((InternalNode<T>) this.blocks.get(children[index]), key);
+        }
+    }
+
+    private int findLeafNode(InternalNode<T> node, T key){
+        T[] keys = node.getKeys();
+        int index = 0;
+        while(index < node.getNumKeys() && this.compare(keys[index], key) < 0){
+            index = index + 1;
+        }
+        int[] children = node.getChildren();
+        if(this.isLeaf(this.blocks.get(children[index]))){
+            return children[index];
+        }
+        else{
+            return findLeafNode((InternalNode<T>) this.blocks.get(children[index]), key);
+        }
+          
+    }
+
+
+    private void updateRootIndex(int index){
+        byte[] bytes = new byte[2];
+        bytes[0] = (byte) (index >> 8);
+        bytes[1] = (byte) (index);
+        this.blocks.get(0).write_data(2, bytes);
+    }
+
+    /*
+    split the root node into two leaf nodes and create a new root node pointing to these two new leaf nodes
+    */
+    private void splitRootAsLeaf(T key, int block_id){
+        LeafNode<T> node = (LeafNode<T>) this.blocks.get(this.getRootId());
+        int numKeys = node.getNumKeys();
+        T[] keys = node.getKeys();
+        int[] blocks = node.getBlockIds();
+        T[] newKeys = (T[]) new Object[keys.length + 1];
+        int[] newblocks = new int[keys.length + 1];
+        // find the correct place of the new value
+        int index = 0;
+        
+        while(index < keys.length && this.compare(keys[index], key) < 0){
+            index = index + 1;
+        }
+        System.arraycopy(keys, 0, newKeys, 0, index);
+        System.arraycopy(blocks, 0, newblocks, 0, index);
+        System.arraycopy(keys, index, newKeys, index + 1, keys.length - index);
+        System.arraycopy(blocks, index, newblocks, index + 1, keys.length - index);
+        newKeys[index] = key;
+        newblocks[index] = block_id;
+
+        int mid = ((this.getOrder() + 1) / 2) - 1;
+        // create a new leaf node
+        LeafNode<T> sibling = new LeafNode<>(typeClass);
+        for(int i=mid; i<newKeys.length; i++){
+            sibling.insert(newKeys[i], newblocks[i]);
+        }
+        // left part
+        // LeafNode<T> siblingl = new LeafNode<>(typeClass);
+        // for(int i=0; i<mid; i++){
+        //     siblingl.insert(newKeys[i], newblocks[i]);
+        // }
+
+        node.removeAllKeysFrom(mid);
+
+        T[] keys2 = node.getKeys();
+        
+        sibling.setNext(node.next());
+        sibling.setPrev(this.getRootId());
+        this.blocks.add(sibling);
+        int siblingIndex = this.blocks.size() - 1;
+        if( node.next() != 0){
+            ((LeafNode<T>) this.blocks.get((node.next()))).setPrev(siblingIndex);
+        }
+        node.setNext(siblingIndex);
+        InternalNode<T> newRoot = new InternalNode<>(newKeys[mid], this.getRootId(), siblingIndex, typeClass);
+        this.blocks.add(newRoot);
+        int newRootIndex = this.blocks.size() - 1;
+        this.updateRootIndex(newRootIndex);
+        node.setParentIndex(newRootIndex);
+        sibling.setParentIndex(newRootIndex);
+    }
+
+    private void splitNode(int nodeIndex, T key, int block_id){
+
+        if(this.getRootId() == nodeIndex){
+            InternalNode<T> node = (InternalNode<T>) this.blocks.get(nodeIndex);
+            T[] keys = node.getKeys();
+            int[] children = node.getChildren();
+            T[] newKeys = (T[]) new Object[keys.length + 1];
+            int[] newchildren = new int[children.length + 1];
+            // find the correct place of the new value
+            int index = 0;
+            while(index < keys.length && this.compare(keys[index], key) < 0){
+                index = index + 1;
+            }
+            System.arraycopy(keys, 0, newKeys, 0, index);
+            System.arraycopy(children, 0, newchildren, 0, index+1);
+            System.arraycopy(keys, index, newKeys, index + 1, keys.length - index);
+            System.arraycopy(children, index+1, newchildren, index + 2, children.length - index - 1);
+            newKeys[index] = key;
+            newchildren[index+1] = block_id;
+
+            int mid = ((this.getOrder() + 1) / 2) - 1;
+            InternalNode<T> newSibling = new InternalNode<>(newKeys[mid+1], newchildren[mid+1], newchildren[mid+2], typeClass);
+            for(int i= mid+2; i<newKeys.length; i++){
+                newSibling.insert(newKeys[i], newchildren[i+1]);
+            }
+
+            for(int i= mid; i<newKeys.length; i++){
+                if(isLeaf(this.blocks.get(newchildren[i+1]))){
+                    ((LeafNode<T>) this.blocks.get(newchildren[i+1])).setParentIndex(this.blocks.size());
+                }else{
+                    ((InternalNode<T>) this.blocks.get(newchildren[i+1])).setParentIndex(this.blocks.size());
+                }
+            }
+            node.removeAllKeysFrom(mid);
+            
+            this.blocks.add(newSibling);
+            int siblingIndex = this.blocks.size() - 1;
+            InternalNode<T> newRoot = new InternalNode<>(newKeys[mid], nodeIndex, siblingIndex, typeClass);
+            this.blocks.add(newRoot);
+            updateRootIndex(this.blocks.size() - 1);
+            node.setParentIndex(this.blocks.size() - 1);
+            newSibling.setParentIndex(this.blocks.size() - 1);
+
+        }
+        else if(this.isLeaf(this.blocks.get(nodeIndex))){
+            LeafNode<T> node = (LeafNode<T>) this.blocks.get(nodeIndex);
+            int numKeys = node.getNumKeys();
+            T[] keys = node.getKeys();
+            int[] blocks = node.getBlockIds();
+            T[] newKeys = (T[]) new Object[keys.length + 1];
+            int[] newblocks = new int[keys.length + 1];
+            // find the correct place of the new value
+            int index = 0;
+            while(index < keys.length && this.compare(keys[index], key) < 0){
+                index = index + 1;
+            }
+            System.arraycopy(keys, 0, newKeys, 0, index);
+            System.arraycopy(blocks, 0, newblocks, 0, index);
+            System.arraycopy(keys, index, newKeys, index + 1, keys.length - index);
+            System.arraycopy(blocks, index, newblocks, index + 1, keys.length - index);
+            
+            
+            newKeys[index] = key;
+            newblocks[index] = block_id;
+
+            int mid = ((this.getOrder() + 1) / 2) - 1;
+            // create a new leaf node
+            LeafNode<T> sibling = new LeafNode<>(typeClass);
+            for(int i=mid; i<newKeys.length; i++){
+                sibling.insert(newKeys[i], newblocks[i]);
+            }
+
+            node.removeAllKeysFrom(mid);
+            sibling.setNext(node.next());
+            sibling.setPrev(nodeIndex);
+            this.blocks.add(sibling);
+            int siblingIndex = this.blocks.size() - 1;
+            if( node.next() != 0){
+                ((LeafNode<T>) this.blocks.get((node.next()))).setPrev(siblingIndex);
+            }
+            node.setNext(siblingIndex);
+            sibling.setParentIndex(node.getParentIndex());
+            if(!this.isFull(node.getParentIndex())){
+                ((InternalNode<T>) this.blocks.get(node.getParentIndex())).insert(newKeys[mid], siblingIndex);
+                return;
+            }
+            else{
+                splitNode(sibling.getParentIndex(), newKeys[mid], siblingIndex);
+            }
+        }
+        else{
+            InternalNode<T> node = (InternalNode<T>) this.blocks.get(nodeIndex);
+            T[] keys = node.getKeys();
+            int[] children = node.getChildren();
+            T[] newKeys = (T[]) new Object[keys.length + 1];
+            int[] newchildren = new int[children.length + 1];
+            // find the correct place of the new value
+            int index = 0;
+            while(index < keys.length && this.compare(keys[index], key) < 0){
+                index = index + 1;
+            }
+            System.arraycopy(keys, 0, newKeys, 0, index);
+            System.arraycopy(children, 0, newchildren, 0, index+1);
+            System.arraycopy(keys, index, newKeys, index + 1, keys.length - index);
+            System.arraycopy(children, index+1, newchildren, index + 2, children.length - index - 1);
+            newKeys[index] = key;
+            newchildren[index+1] = block_id;
+
+            int mid = ((this.getOrder() + 1) / 2) - 1;
+            InternalNode<T> newSibling = new InternalNode<>(newKeys[mid+1], newchildren[mid+1], newchildren[mid+2], typeClass);
+            node.removeAllKeysFrom(mid);
+            newSibling.setParentIndex(node.getParentIndex());
+            for(int i= mid+2; i<newKeys.length; i++){
+                newSibling.insert(newKeys[i], newchildren[i+1]);
+                //update the parent pointer of these children
+            }
+            for(int i= mid; i<newKeys.length; i++){
+                if(isLeaf(this.blocks.get(newchildren[i+1]))){
+                    ((LeafNode<T>) this.blocks.get(newchildren[i+1])).setParentIndex(this.blocks.size());
+                }else{
+                    ((InternalNode<T>) this.blocks.get(newchildren[i+1])).setParentIndex(this.blocks.size());
+                }
+            }
+            
+            this.blocks.add(newSibling);
+            int siblingIndex = this.blocks.size() - 1;
+            if(!this.isFull(node.getParentIndex())){
+                ((InternalNode<T>) this.blocks.get(node.getParentIndex())).insert(newKeys[mid], siblingIndex);
+                    
+                return;
+            }
+            else{
+                splitNode(newSibling.getParentIndex(), newKeys[mid], siblingIndex);
+               
+            }
+        }
+        
+    }
+
     // will be evaluated
     public void insert(T key, int block_id) {
 
         /* Write your code here */
+        /* get block which can contain this key*/
+        int rootIndex = this.getRootId();
+
+        if(this.isLeaf(this.blocks.get(rootIndex))){
+            if(!this.isFull(rootIndex)){
+                ((LeafNode<T>) this.blocks.get(rootIndex)).insert(key, block_id); 
+            }else{
+                splitRootAsLeaf(key, block_id);
+            }
+            return;
+        }
+        
+        int leafNodeIndex = this.findLeafNode(key);
+        if(this.isFull(leafNodeIndex)){
+            splitNode(leafNodeIndex, key, block_id);
+        }
+        else{
+            ((LeafNode<T>) this.blocks.get(leafNodeIndex)).insert(key, block_id);
+        }
         return;
     }
 
@@ -81,6 +345,26 @@ public class BPlusTreeIndexFile<T> extends AbstractFile<BlockNode> {
     public int search(T key) {
 
         /* Write your code here */
+        int rootNodeIndex = this.getRootId();
+        if (this.isLeaf(rootNodeIndex)){
+            T[] keys = ((LeafNode<T>) this.blocks.get(rootNodeIndex)).getKeys();
+            int[] children = ((LeafNode<T>) this.blocks.get(rootNodeIndex)).getBlockIds();
+            for(int i=0; i<keys.length; i++){
+                if(this.compare(key, keys[i]) == 0){
+                    return rootNodeIndex;
+                }
+            }
+            return -1;
+        }
+
+        int leafNodeIndex = this.findLeafNode(key);
+        T[] keys = ((LeafNode<T>) this.blocks.get(leafNodeIndex)).getKeys();
+        int[] children = ((LeafNode<T>) this.blocks.get(leafNodeIndex)).getBlockIds();
+        for(int i=0; i<keys.length; i++){
+            if(this.compare(key, keys[i]) == 0){
+               return leafNodeIndex;
+            }
+        }
         return -1;
     }
 
@@ -90,6 +374,10 @@ public class BPlusTreeIndexFile<T> extends AbstractFile<BlockNode> {
 
         /* Write your code here */
         return false;
+    }
+
+    public List<BlockNode> return_blocks(){
+        return this.blocks;
     }
 
     // DO NOT CHANGE THIS - will be used for evaluation

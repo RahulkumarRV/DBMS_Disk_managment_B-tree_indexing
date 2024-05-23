@@ -51,24 +51,24 @@ public class MyCalciteConnectionTest {
 
             // Uncomment this to check the records returned by IndexScan
             
-            // assert (result.size() == 101);
+            assert (result.size() == 101);
 
-            // List <Integer> actor_ids = new ArrayList<>();
+            List <Integer> actor_ids = new ArrayList<>();
 
-            // for (Object [] row : result) {
-            //     assert (row.length == 4);
-            //     assert (row[0] instanceof Integer);
-            //     assert ((Integer)row[0] >= 100);
-            //     actor_ids.add((Integer)row[0]);
-            // }
+            for (Object [] row : result) {
+                assert (row.length == 4);
+                assert (row[0] instanceof Integer);
+                assert ((Integer)row[0] >= 100);
+                actor_ids.add((Integer)row[0]);
+            }
 
-            // // sort the actor_ids
-            // actor_ids.sort(null);
+            // sort the actor_ids
+            actor_ids.sort(null);
 
-            // // result actor_ids should be from 100 to 200
-            // for (int i = 0; i < actor_ids.size(); i++) {
-            //     assert (actor_ids.get(i).equals(100 + i));
-            // }
+            // result actor_ids should be from 100 to 200
+            for (int i = 0; i < actor_ids.size(); i++) {
+                assert (actor_ids.get(i).equals(100 + i));
+            }
 
             calciteConnection.close();
         }
